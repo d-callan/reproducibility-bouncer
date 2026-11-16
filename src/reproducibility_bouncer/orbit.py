@@ -193,10 +193,15 @@ def run_orbit(
                 cmd, cwd=workdir, env=_env(),
                 capture_output=True, text=True, timeout=remaining,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
+            # e.stdout/e.stderr hold whatever the child emitted before
+            # the kill — the audit trail for a timeout is exactly this.
+            def _text(x): return x.decode("utf-8", "replace") if \
+                isinstance(x, bytes) else (x or "")
             transcript.append(
                 f"===== attempt {attempt + 1}: killed at wall "
-                f"{time.monotonic() - t0:.0f}s (timeout) =====\n")
+                f"{time.monotonic() - t0:.0f}s (timeout) =====\n"
+                f"{_text(e.stdout)}\n{_text(e.stderr)}\n")
             _save()
             return {"status": "timeout",
                     "wall_s": round(time.monotonic() - t0, 1),

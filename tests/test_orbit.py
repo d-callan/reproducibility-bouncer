@@ -88,6 +88,26 @@ def test_timeout_budget_shared_across_attempts(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_timeout_saves_partial_output(tmp_path, monkeypatch):
+    """A killed attempt's pre-kill stdout/stderr IS the audit trail —
+    it must land in orbit_stdout.log, not just the killed marker."""
+    _run_cmds(monkeypatch, [
+        subprocess.TimeoutExpired(
+            cmd="orbit", timeout=5,
+            output=b"partial work output\n",
+            stderr=b"err line\n"),
+    ])
+    res = orbit.run_orbit(
+        "p", tmp_path / "w", tmp_path / "s",
+        argv=["node", "orbit.js"], timeout_s=10, retry_delay_s=0,
+    )
+    assert res["status"] == "timeout"
+    log = (tmp_path / "w" / "orbit_stdout.log").read_text()
+    assert "partial work output" in log
+    assert "err line" in log
+    assert "killed at wall" in log
+
+
 def test_env_configures_retries(tmp_path, monkeypatch):
     monkeypatch.setenv("REPRO_ORBIT_RETRIES", "0")
     calls = _run_cmds(monkeypatch, [
