@@ -47,15 +47,19 @@ def static_checks(
 
     # ---- deterministic -------------------------------------------
     for i, sup in enumerate(doc.supplements):
-        if not sup.get("fetched"):
+        unfetched = not sup.get("fetched")
+        unparsed = sup.get("fetched") and sup.get("units") is None
+        if unfetched or unparsed:
+            desc = (f"supplement '{sup.get('filename')}' declared "
+                    "but not fetched" if unfetched else
+                    f"supplement '{sup.get('filename')}' fetched "
+                    "but could not be parsed")
             findings.append(Finding(
                 id=_new_id("finding", f"supp:{i}"),
                 axis="artifact_access", severity="warning",
                 subject=[f"document:{doc.id}"],
                 mechanism="deterministic", confidence=1.0,
-                description=f"supplement '{sup.get('filename')}' "
-                            "declared but not fetched — its content "
-                            "is unaudited",
+                description=f"{desc} — its content is unaudited",
                 coverage_caveat=True,
             ))
 

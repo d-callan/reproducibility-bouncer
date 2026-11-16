@@ -1,9 +1,14 @@
+import io
+import zipfile
+
 import pytest
 
 from reproducibility_bouncer.clients import ClientError
 from reproducibility_bouncer.document import (
+    _fetch_supplements,
     _parse_jats,
     _parse_plain_text,
+    _supp_units,
     acquire,
 )
 from reproducibility_bouncer.auditrecord import Document, SectionName
@@ -43,6 +48,94 @@ def test_jats_supplement_manifest():
     assert len(doc.supplements) == 1
     assert doc.supplements[0]["filename"] == "supp_table1.xlsx"
     assert doc.supplements[0]["fetched"] is False
+
+
+def _xlsx_bytes(rows) -> bytes:
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "params"
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_supp_units_xlsx_rows():
+    data = _xlsx_bytes([["param", "value"], ["alpha", 0.05]])
+    units = _supp_units("supp_table1.xlsx", data)
+    assert units[0] == "sheet: params"
+    assert "row 2: alpha | 0.05" in units
+
+
+def test_supp_units_csv_and_txt():
+    units = _supp_units("t.csv", b"a,b\n1,2\n")
+    assert any("row" in u and "1" in u for u in units)
+    units = _supp_units("notes.txt", b"first line. second line.")
+    assert any("first line" in u for u in units)
+
+
+def test_supp_units_unsupported():
+    assert _supp_units("fig.png", b"\x89PNG") is None
+
+
+def test_supp_units_truncation():
+    data = b"line.\n" * 5000
+    units = _supp_units("big.txt", data)
+    assert len(units) <= 201
+    assert units[-1].startswith("[supplement truncated")
+
+
+def test_fetch_supplements_matches_manifest():
+    doc = _parse_jats(JATS_FIXTURE, Document())
+    doc.source["pmcid"] = "PMC9999999"
+    n_secs = len(doc.sections)
+    ev = _fetch_supplements(
+        doc, transport=transport(supp_zip=_zip_bytes({
+            "supp_table1.xlsx": _xlsx_bytes([["DESeq", "1.40"]]),
+            "extra.pdf": b"%PDF-1.4 fake",   # unmanifested + unparsed
+        })))
+    assert ev
+    sup = doc.supplements[0]
+    assert sup["fetched"] is True
+    assert sup["units"][0] == "sheet: params"
+    assert sup["section"] == n_secs
+    assert doc.sections[n_secs].name == SectionName.supplement
+    extra = doc.supplements[1]
+    assert extra["unmanifested"] is True
+    assert extra["fetched"] is True
+    assert extra["units"] is None      # fake pdf doesn't parse
+    assert any("unparsed" in n for n in doc.coverage_notes)
+
+
+def test_fetch_supplements_no_zip_member_stays_unfetched():
+    doc = _parse_jats(JATS_FIXTURE, Document())
+    doc.source["pmcid"] = "PMC9999999"
+    _fetch_supplements(
+        doc, transport=transport(supp_zip=_zip_bytes({
+            "other.txt": b"irrelevant.",
+        })))
+    sup = doc.supplements[0]
+    assert sup["fetched"] is False     # no member matched the manifest
+    assert doc.supplements[1]["fetched"] is True
+
+
+def test_fetch_supplements_fetch_failure_notes():
+    doc = _parse_jats(JATS_FIXTURE, Document())
+    doc.source["pmcid"] = "PMC9999999"
+    ev = _fetch_supplements(doc, transport=transport())  # 404 default
+    assert ev == []
+    assert doc.supplements[0]["fetched"] is False
+    assert any("unfetchable" in n for n in doc.coverage_notes)
 
 
 def test_jats_inline_stats():

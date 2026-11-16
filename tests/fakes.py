@@ -146,6 +146,7 @@ def transport(
     *,
     jats: str | None = JATS_FIXTURE,
     pdf: bytes | None = None,
+    supp_zip: bytes | None = None,
 ) -> httpx.MockTransport:
     """MockTransport serving canned responses by host + path."""
 
@@ -162,6 +163,10 @@ def transport(
                 if jats is None:
                     return httpx.Response(404, text="not in OA subset")
                 return httpx.Response(200, text=jats)
+            if path.endswith("/supplementaryFiles"):
+                if supp_zip is None:
+                    return httpx.Response(404, text="no supplements")
+                return httpx.Response(200, content=supp_zip)
             if path.endswith("/filereport"):
                 return httpx.Response(200, text=ENA_REPORT)
         if host == "eutils.ncbi.nlm.nih.gov":

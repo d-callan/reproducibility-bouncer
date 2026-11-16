@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from ..evidence import Evidence
-from . import ClientError, get_json, get_text
+from . import ClientError, get_bytes, get_json, get_text
 
 API = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 
@@ -78,3 +78,22 @@ def fetch_jats(
     ev.summary = f"europepmc JATS {pmc}"
     ev.payload = {"bytes": len(xml)}
     return xml, ev
+
+
+def fetch_supplementary(
+    pmcid: str,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[bytes, Evidence]:
+    """PMCID -> ZIP of all supplementary files (OA subset only)."""
+    pmc = pmcid if pmcid.startswith("PMC") else f"PMC{pmcid}"
+    data, ev = get_bytes(
+        f"{API}/{pmc}/supplementaryFiles",
+        # europepmc streams these archives slowly — multi-MB ZIPs
+        # take minutes; the default 120s read timeout truncates them.
+        timeout=300.0,
+        source="europepmc", transport=transport,
+    )
+    ev.summary = f"europepmc supplements {pmc}"
+    ev.payload = {"bytes": len(data)}
+    return data, ev

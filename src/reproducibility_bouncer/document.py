@@ -13,9 +13,13 @@ statistical reports extracted, supplement manifest recorded.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import re
 import subprocess
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,7 +32,9 @@ from .auditrecord import (
 )
 from .clients import ClientError, get_bytes
 from .clients.crossref import get_work
-from .clients.europepmc import fetch_jats, resolve_ids
+from .clients.europepmc import (
+    fetch_jats, fetch_supplementary, resolve_ids,
+)
 from .clients.unpaywall import get_oa
 from .evidence import Evidence
 from .intake import InputKind, Intake
@@ -240,11 +246,19 @@ def _parse_jats(
                         )
                         if href:
                             break
-                doc.supplements.append({
-                    "filename": href or (_text(sm)[:80] or "supplement"),
-                    "fetched": False,
-                    "units": None,
-                })
+                fname = href or (_text(sm)[:80] or "supplement")
+                # the same file may be declared several times
+                # (inline + back-matter); dedupe by basename
+                base = Path(fname).name.lower()
+                if not any(
+                    Path(s["filename"]).name.lower() == base
+                    for s in doc.supplements
+                ):
+                    doc.supplements.append({
+                        "filename": fname,
+                        "fetched": False,
+                        "units": None,
+                    })
 
     doc.sections = sections
     if section_notes and not sections:
@@ -336,6 +350,155 @@ def _docx_text(path: Path) -> str:
     return out.stdout
 
 
+# ------------------------------------------------------------ supplements
+
+# Supplements can be arbitrarily large — cap what enters the citable
+# unit stream (eval-driver lesson: monolithic blobs get inhaled whole
+# into context). Truncated files get a terminal marker unit so the
+# audit can see coverage stopped.
+_SUPP_MAX_UNITS = 200
+_SUPP_MAX_ROWS = 500        # spreadsheet rows per sheet
+_SUPP_MAX_CELL = 500        # chars per spreadsheet cell
+_SUPP_TRUNC = "[supplement truncated — first units only]"
+
+
+def _sheet_units(name: str, rows) -> list[str]:
+    """Spreadsheet rows -> 'row n: v1 | v2' unit lines, capped."""
+    out = [f"sheet: {name}"]
+    for i, row in enumerate(rows):
+        if i >= _SUPP_MAX_ROWS:
+            out.append(f"sheet {name}: "
+                       f"truncated at {_SUPP_MAX_ROWS} rows")
+            break
+        vals = [str(c)[:_SUPP_MAX_CELL] for c in row
+                if c is not None and str(c).strip()]
+        if vals:
+            out.append(f"row {i + 1}: " + " | ".join(vals))
+    return out
+
+
+def _supp_units(filename: str, data: bytes) -> list[str] | None:
+    """Parse one supplement's bytes -> unit-text list (None = type
+    we can't turn into text — images, zip, media)."""
+    ext = Path(filename).suffix.lower()
+    units: list[str]
+    try:
+        if ext == ".pdf":
+            try:
+                import pymupdf
+                pdf = pymupdf.open(stream=data, filetype="pdf")
+                text = "\n".join(p.get_text() for p in pdf)
+            except Exception:
+                return None
+            units = _sentences(text)
+        elif ext == ".docx":
+            with tempfile.NamedTemporaryFile(
+                    suffix=".docx", delete=False) as tmp:
+                tmp.write(data)
+            try:
+                units = _sentences(_docx_text(Path(tmp.name)))
+            except ClientError:
+                return None
+            finally:
+                Path(tmp.name).unlink(missing_ok=True)
+        elif ext == ".xlsx":
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(
+                    io.BytesIO(data), read_only=True, data_only=True)
+            except Exception:
+                return None
+            units = []
+            for ws in wb.worksheets:
+                units += _sheet_units(
+                    ws.title, (r for r in ws.iter_rows(
+                        values_only=True)))
+            wb.close()
+        elif ext in (".csv", ".tsv"):
+            try:
+                text = data.decode("utf-8", "replace")
+                dialect = ("excel-tab" if ext == ".tsv"
+                           else "excel")
+                rows = csv.reader(io.StringIO(text), dialect=dialect)
+                units = _sheet_units("data", rows)
+            except csv.Error:
+                return None
+        elif ext in (".txt", ".md", ".tsv.txt"):
+            units = _sentences(data.decode("utf-8", "replace"))
+        else:
+            return None
+    except (KeyError, AttributeError, TypeError):
+        return None
+    truncated = len(units) > _SUPP_MAX_UNITS
+    units = units[:_SUPP_MAX_UNITS]
+    if truncated:
+        units.append(_SUPP_TRUNC)
+    return units
+
+
+def _fetch_supplements(
+    doc: Document,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> list[Evidence]:
+    """Populate doc.supplements manifest from the EuropePMC
+    supplementaryFiles ZIP and append parsed content as citable
+    `supplement` sections so slot binding and the JEV questions
+    (methods-completeness asks about 'text + supplement') see it.
+    Manifest entries with no matching ZIP member stay unfetched —
+    the 'declared but not fetched' finding then honestly reports
+    the gap."""
+    if not doc.supplements or not doc.source.get("pmcid"):
+        return []
+    try:
+        blob, ev = fetch_supplementary(
+            doc.source["pmcid"], transport=transport)
+    except ClientError as err:
+        doc.coverage_notes.append(f"supplements unfetchable: {err}")
+        return []
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(blob))
+    except zipfile.BadZipFile:
+        doc.coverage_notes.append("supplementaryFiles: not a ZIP")
+        return [ev]
+    # manifest 'filename' is an href basename or a label; match on
+    # basename, case-insensitive
+    by_manifest = {
+        Path(s.get("filename", "")).name.lower(): s
+        for s in doc.supplements
+    }
+    for member in zf.infolist():
+        if member.is_dir():
+            continue
+        base = Path(member.filename).name.lower()
+        sup = by_manifest.get(base)
+        if sup is None:
+            sup = {"filename": member.filename, "fetched": False,
+                   "units": None, "unmanifested": True}
+            doc.supplements.append(sup)
+        try:
+            data = zf.read(member)
+        except (OSError, RuntimeError) as err:
+            doc.coverage_notes.append(
+                f"supplement {member.filename}: unreadable ({err})")
+            continue
+        units = _supp_units(member.filename, data)
+        sup["fetched"] = True
+        sup["units"] = units
+        if units:
+            sup["section"] = len(doc.sections)
+            doc.sections.append(Section(
+                name=SectionName.supplement,
+                units=[Unit(index=i + 1, text=t)
+                       for i, t in enumerate(units)],
+            ))
+        else:
+            doc.coverage_notes.append(
+                f"supplement {member.filename}: fetched but "
+                "unparsed (unsupported type)")
+    return [ev]
+
+
 # ------------------------------------------------------------ driver
 
 
@@ -421,6 +584,7 @@ def acquire(
             xml, e = fetch_jats(pmcid, transport=transport)
             ev.append(e)
             doc = _parse_jats(xml, doc)
+            ev.extend(_fetch_supplements(doc, transport=transport))
             doc.source_used = "pmc_oa"
             doc.retrieval_url = e.endpoint
             return doc, ev
