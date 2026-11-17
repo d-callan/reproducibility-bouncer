@@ -108,7 +108,9 @@ class LlmClient:
         # fail fast -- retrying cannot fix them.
         err: LlmError | None = None
         resp: httpx.Response | None = None
-        for attempt in range(3):
+        retries = int(os.environ.get("LLM_RETRIES") or 2)
+        delay_s = float(os.environ.get("LLM_RETRY_DELAY_S") or 20)
+        for attempt in range(1 + retries):
             with self._pace_lock:
                 wait = self.min_interval - (
                     time.monotonic() - self._last_req
@@ -136,11 +138,11 @@ class LlmClient:
                 )
                 if resp.status_code < 500:
                     raise err
-            if attempt < 2:
+            if attempt < retries:
                 # long spacing: a gateway-504'd generation may still be
                 # running server-side; an immediate retry doubles the load
                 # on a shared endpoint.
-                time.sleep(20 * (attempt + 1))
+                time.sleep(delay_s * (attempt + 1))
         if resp is None or resp.status_code != 200:
             assert err is not None
             raise err

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from reproducibility_bouncer.auditrecord import (
@@ -9,10 +11,13 @@ from reproducibility_bouncer.auditrecord import (
 from reproducibility_bouncer.extract import (
     _cites,
     _merge_proposals,
+    _prompt_blocks,
+    _propose,
     _to_records,
     extract_units,
 )
 from reproducibility_bouncer.jev import JevClient
+from reproducibility_bouncer.llm import LlmError
 
 from fakes import FakeLlm
 
@@ -115,3 +120,78 @@ def test_bad_json_yields_no_units():
         _doc(), jev=JevClient(mock=True), llm=BadLlm(),
     )
     assert units == [] and findings == []
+
+
+def _doc_big(units_per_section=6):
+    """Doc sized so a small REPRO_EXTRACT_BLOCK_CHARS forces
+    multiple prompt blocks. Includes an abstract (context section)."""
+    def units(prefix):
+        return [
+            Unit(index=i + 1, text=f"{prefix} sentence {i + 1}. " * 4)
+            for i in range(units_per_section)
+        ]
+    return Document(
+        id="d2",
+        sections=[
+            Section(name=SectionName.abstract,
+                    units=[Unit(index=1, text="We study X.")]),
+            Section(name=SectionName.methods, units=units("Methods")),
+            Section(name=SectionName.results, units=units("Results")),
+            Section(name=SectionName.das, units=units("Data")),
+        ],
+    )
+
+
+def test_prompt_blocks_env_budget(monkeypatch):
+    doc = _doc_big()
+    assert len(_prompt_blocks(doc)) == 1  # under the 25k default
+    monkeypatch.setenv("REPRO_EXTRACT_BLOCK_CHARS", "500")
+    blocks = _prompt_blocks(doc)
+    assert len(blocks) > 1
+    assert "## section -1" in blocks[0]
+
+
+def test_propose_tolerates_block_failure(monkeypatch):
+    """A dead LLM call skips its block — coverage note records the
+    gap, other blocks' proposals still merge."""
+    monkeypatch.setenv("REPRO_EXTRACT_BLOCK_CHARS", "500")
+
+    class FlakyLlm:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, system, user, temperature=None):
+            self.calls.append(user)
+            if len(self.calls) == 1:
+                raise LlmError("gateway down")
+            return json.dumps({"units": [{
+                "title": "u", "cites": ["2.1"],
+                "outputs": [{"result_key": "r1"}]}]})
+
+    doc = _doc_big()
+    llm = FlakyLlm()
+    merged = _propose(doc, llm)
+    assert len(llm.calls) > 1          # multiple blocks attempted
+    assert len(merged) == 1            # later block still proposed
+    assert any("skipped prompt block 0" in n
+               for n in doc.coverage_notes)
+
+
+def test_propose_context_not_duplicated(monkeypatch):
+    """Block 0 already embeds context as '## section -1'; the
+    '## context' header must not be prepended a second time."""
+    monkeypatch.setenv("REPRO_EXTRACT_BLOCK_CHARS", "500")
+
+    class RecLlm:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, system, user, temperature=None):
+            self.calls.append(user)
+            return json.dumps({"units": []})
+
+    llm = RecLlm()
+    _propose(_doc_big(), llm)
+    assert len(llm.calls) > 1
+    assert "## context (abstract/discussion)" not in llm.calls[0]
+    assert "## context (abstract/discussion)" in llm.calls[1]

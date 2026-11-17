@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -29,13 +30,25 @@ from .auditrecord import (
     _new_id,
 )
 
+from .llm import LlmError
+
 log = logging.getLogger(__name__)
 
 _EXTRACT_SECTIONS = {
     "methods", "results", "captions", "das", "cas", "supplement",
 }
 _CONTEXT_SECTIONS = {"abstract", "discussion"}
-_PROMPT_BUDGET = 60_000        # chars of numbered units per LLM call
+# chars of numbered units per LLM call. Default errs small: each
+# block's generation must finish inside shared endpoints' proxy
+# timeouts, and smaller prompts stay inside smaller models' context.
+# Tune via REPRO_EXTRACT_BLOCK_CHARS.
+_PROMPT_BUDGET = 25_000
+# max chars of numbered units sent as JEV `state` for a2 judging.
+# The judge batches all questions against this state — oversized
+# states overflow its context even for a single question
+# (observed: supplement-augmented docs at the 100k legacy cap).
+# Tune via REPRO_JEV_STATE_CHARS.
+_JEV_STATE_CHARS = 60_000
 _HEADLINE_CAP = 3
 _NOUL_SUPPORT, _NOUL_REJECT = 0.6, 0.4  # P(supported) thresholds
 
@@ -115,8 +128,10 @@ def _unit_texts(doc: Document, refs: list[UnitRef]) -> list[str]:
 
 def _prompt_blocks(doc: Document) -> list[str]:
     """One or more numbered-unit blocks — split when over budget."""
+    budget = int(
+        os.environ.get("REPRO_EXTRACT_BLOCK_CHARS") or _PROMPT_BUDGET)
     full = _numbered(doc, _EXTRACT_SECTIONS)
-    if len(full) <= _PROMPT_BUDGET:
+    if len(full) <= budget:
         return [full]
     blocks, cur = [], f"## section -1 (context)\n{_numbered(doc, _CONTEXT_SECTIONS)}"
     for si, sec in enumerate(doc.sections):
@@ -125,7 +140,7 @@ def _prompt_blocks(doc: Document) -> list[str]:
         part = f"## section {si} ({sec.name})\n" + "\n".join(
             f"[{si}.{u.index}] {u.text}" for u in sec.units
         )
-        if len(cur) + len(part) > _PROMPT_BUDGET and cur.strip():
+        if len(cur) + len(part) > budget and cur.strip():
             blocks.append(cur)
             cur = ""
         cur += part + "\n"
@@ -138,17 +153,26 @@ def _propose(doc: Document, llm) -> list[dict[str, Any]]:
     """LLM proposals per block -> one merged raw list."""
     ctx = _numbered(doc, _CONTEXT_SECTIONS)
     raw: list[dict[str, Any]] = []
-    for block in _prompt_blocks(doc):
+    for bi, block in enumerate(_prompt_blocks(doc)):
         user = (
             "SOURCE UNITS (id = section.unit):\n\n"
             + ("## context (abstract/discussion)\n" + ctx + "\n\n"
-               if "## context" not in block else "")
+               if "## section -1" not in block else "")
             + block
         )
         try:
             data = json.loads(llm.complete(_SYSTEM, user))
         except (json.JSONDecodeError, TypeError) as e:
-            log.warning("a2: bad generator JSON: %s", e)
+            log.warning("a2: bad generator JSON (block %d): %s", bi, e)
+            doc.coverage_notes.append(
+                f"extraction block {bi} returned unparseable output")
+            continue
+        except LlmError as e:
+            # a dead block degrades coverage, not the whole run — the
+            # coverage note keeps the gap auditable
+            log.warning("a2: generator failed on block %d: %s", bi, e)
+            doc.coverage_notes.append(
+                f"extraction skipped prompt block {bi}: {e}")
             continue
         units = data.get("units")
         if isinstance(units, list):
@@ -269,7 +293,14 @@ def extract_units(
     all_slots = [s for ss in slots_by_unit.values() for s in ss]
 
     # ---- one JEV batch: all questions, all units -------------------
-    state = {"sections": _numbered(doc, _EXTRACT_SECTIONS | _CONTEXT_SECTIONS)[:100_000]}
+    cap = int(os.environ.get("REPRO_JEV_STATE_CHARS")
+              or _JEV_STATE_CHARS)
+    numbered = _numbered(doc, _EXTRACT_SECTIONS | _CONTEXT_SECTIONS)
+    if len(numbered) > cap:
+        doc.coverage_notes.append(
+            f"a2 JEV state truncated to {cap} chars "
+            f"({len(numbered)} total) — late units unseen by judge")
+    state = {"sections": numbered[:cap]}
     q: dict[str, dict[str, Any]] = {}
     for unit in units:
         texts = _unit_texts(doc, unit.source_units)
