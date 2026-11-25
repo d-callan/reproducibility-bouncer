@@ -465,7 +465,7 @@ Two flavors of checks per axis (§6):
   levels in `criteria` (JEV score type already supports this).
 - **Verdict**: `PASS` iff ≥ τ of K runs reach `M4`; τ calibrated (§8),
   initial working value 3/5. Document-mode-only audits (no `--full`, or
-  draft without runnable artifacts) emit `READINESS` verdicts instead of
+  draft without runnable artifacts) emit `NA` verdicts instead of
   PASS/FAIL, so a cheap scan never masquerades as a reproduction verdict.
 - Report: JSON (machine) + HTML (human). Every score links to its
   evidence; every suggestion cites the check that produced it.
@@ -744,7 +744,7 @@ Runtime configuration (env vars):
   just dumps the parsed Document — useful immediately.
 - **M1 — static audit** (shippable v0.1): A2 extraction, A3 for the top
   ~6 repos (GitHub, Zenodo, GEO, SRA, OSF, Dryad), A4 binding + A5
-  checks, A7 READINESS report. No execution yet — still valuable.
+  checks, A7 report (verdict NA — no execution yet, still valuable).
 - **M2 — harness**: A6 gate + Orbit backend (optional dep, pinned
   versions), K runs, milestone mapping, stall forensics → first
   PASS/FAIL. No custom agent loop unless Orbit proves unfit — the

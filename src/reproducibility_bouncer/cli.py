@@ -104,8 +104,8 @@ def audit(
                                   help="offline dev: canned generator"),
 ) -> None:
     """Run the audit pipeline and emit the A7 report. Static mode
-    gives a READINESS verdict; --full adds A6 reproduction runs and a
-    PASS/FAIL/INDETERMINATE verdict."""
+    gives an NA verdict (reproduction not attempted); --full adds A6
+    reproduction runs and a PASS/FAIL/INDETERMINATE verdict."""
     from .jev import JevClient
     from .llm import LlmClient
     from .pipeline import run_full, run_static

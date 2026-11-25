@@ -232,7 +232,7 @@ def render_html(audit: dict, report: dict) -> str:
     }
 
     label = verdict.get("label", "?")
-    vcls = {"PASS": "ok", "READINESS": "info", "FAIL": "block",
+    vcls = {"PASS": "ok", "NA": "info", "FAIL": "block",
             "INDETERMINATE": "warn"}.get(label, "mute")
     flavor = verdict.get("flavor")
     flavor_s = (f' {_badge(flavor, "warn")}' if flavor else "")

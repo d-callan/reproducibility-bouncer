@@ -140,7 +140,7 @@ extraction-coverage caveat (`coverage_caveat: true`).
 
 `{verdict, axes, findings, questions, runs, costs, meta}`
 
-- `verdict`: {`label` (`PASS|FAIL|READINESS|INDETERMINATE`),
+- `verdict`: {`label` (`PASS|FAIL|NA|INDETERMINATE`),
   `flavor` (`gate-blocked:<criterion>` | null), `tau`, `k`,
   `passing_runs`, `checked_runs`}
 - `axes`: {axis → {`score`, `confidence`, `finding_ids[]`}}

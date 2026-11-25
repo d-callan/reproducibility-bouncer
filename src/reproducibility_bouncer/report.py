@@ -1,6 +1,7 @@
 """A7 — report assembly.
 
-Static mode emits READINESS; blocking findings flavor it
+Static mode emits NA (reproduction not attempted — no PASS/FAIL
+judgment applies); blocking findings flavor it
 `gate-blocked:<criterion>` per the A6 gate spec. Axes are severity
 gates, not scores (Decision 12): each axis reports its worst
 finding level + finding ids, not a number that pretends to sum.
@@ -110,7 +111,7 @@ def build_report(
         _AXIS_GATE.get(f.axis, f.axis) for f in blocking
     } or (["open-questions"] if open_q else []))
     verdict = {
-        "label": "READINESS",
+        "label": "NA",
         "flavor": f"gate-blocked:{','.join(gate)}" if gate else None,
         "tau": None, "k": None,
         "passing_runs": None, "checked_runs": None,

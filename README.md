@@ -37,7 +37,7 @@ reprobouncer document 10.3389/fmicb.2021.626715 --out doc.json
 # draft mode
 reprobouncer document ./paper.pdf --draft
 
-# static audit (A0–A5) -> A7 READINESS report
+# static audit (A0–A5) -> A7 report (verdict NA: reproduction not attempted)
 reprobouncer audit doi:10.1073/pnas.2409747121 --out audit.json
 reprobouncer audit ./paper.pdf --draft
 
@@ -50,7 +50,7 @@ reprobouncer audit doi:...  --full --force-run   # calibration only
 ```
 
 `document` emits `{document, evidence}`; `audit` emits `{audit,
-report}` — verdict (`READINESS`/`gate-blocked:<criterion>` static,
+report}` — verdict (`NA`/`gate-blocked:<criterion>` static,
 `PASS`/`FAIL`/`INDETERMINATE` full), per-axis levels, findings,
 clarification questions, run records, counts, cost logs.
 
